@@ -13,138 +13,171 @@ const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 const crypto = require("crypto"); 
 
+// Models & Routes
 const User = require("./models/User"); 
+const chatRoutes = require("./routes/chatRoutes");
+const messageRoutes = require("./routes/messageRoutes");
+const userRoutes = require('./routes/userRoutes');
 
 const PORT = process.env.PORT || 5000;
 
-// ================= FIREBASE SETUP (Safe Mode) =================
-// ================= FIREBASE SETUP (Safe Mode & Render Compatible) =================
-// try {
-//     let serviceAccount;
+const app = express();
+const server = http.createServer(app);
 
-//     // Check karein ki hum Render par hain ya Local
-//     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-//     console.log("Raw Env Var (First 50 chars):", process.env.FIREBASE_SERVICE_ACCOUNT.substring(0, 50)); // Ye line add karein check karne ke liye
-    
-//     try {
-//         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-//     } catch (e) {
-//         console.error("JSON Parse Failed:", e.message);
-//     }
-// }
-//     admin.initializeApp({
-//         credential: admin.credential.cert(serviceAccount)
-//     });
-//     console.log("🔥 Firebase Admin Initialized");
-// } catch (error) {
-//     console.log("⚠️ Firebase Config Error: " + error.message);
-//     console.log("⚠️ Notifications won't work until Key is fixed.");
-// }
-// ================= FIREBASE SETUP (Safe Mode & Render Compatible) =================
-// ================= FIREBASE SETUP (Safe Mode & Render Compatible) =================
+// ================= MIDDLEWARES =================
+app.use(express.json());
+app.use(cors({
+    // Apne frontend ka production URL yahan zaroor add karein
+    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"], 
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 // ================= FIREBASE SETUP (Robust Fix) =================
 try {
     let serviceAccount;
     let privateKey;
 
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        // 1. Parse JSON from Env
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        
-        // 2. Fix Private Key (Handle both cases: literal \n and encoded \\n)
         privateKey = serviceAccount.private_key
             ? serviceAccount.private_key.replace(/\\n/g, '\n') 
             : undefined;
-
     } else {
-        // 1. Local File
-        serviceAccount = require("./firebase-service-key.json");
-        privateKey = serviceAccount.private_key;
+        // Local File Fallback
+        try {
+            serviceAccount = require("./firebase-service-key.json");
+            privateKey = serviceAccount.private_key;
+        } catch (e) {
+            console.log("⚠️ No local firebase file found, relying on Env Vars.");
+        }
     }
 
-    // 3. Robust Check: Initialize Firebase
     if (serviceAccount && privateKey) {
         admin.initializeApp({
             credential: admin.credential.cert({
                 projectId: serviceAccount.project_id,
                 clientEmail: serviceAccount.client_email,
-                privateKey: privateKey // <-- Isse direct pass karein
+                privateKey: privateKey 
             })
         });
         console.log("🔥 Firebase Admin Initialized Successfully");
     } else {
-        throw new Error("Missing Private Key or Service Account data");
+        console.log("⚠️ Firebase Warning: Missing Private Key. Notifications won't work.");
     }
-
 } catch (error) {
     console.log("⚠️ Firebase Config Error: " + error.message);
-    // Debugging (Isse turant pata chal jayega agar format galat hai)
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log("🔍 Private Key Start:", JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT).private_key.substring(0, 35));
-    }
-    console.log("⚠️ Notifications won't work until Key is fixed.");
 }
-const app = express();
-const server = http.createServer(app);
-
-// ================= 🔥 SOCKET.IO SETUP =================
-const io = new Server(server, {
-  pingTimeout: 60000,
-  cors: { 
-    // Frontend ke saare possible URLs allow karein
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000"],
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-});
-
-// Make IO accessible in Controllers
-app.set('io', io);
-
-// ================= MIDDLEWARES =================
-app.use(express.json());
-app.use(cors({
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000"], 
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
 
 // ================= DB CONNECTION =================
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
   .then(() => console.log("✅ MongoDB Connected"))
   .catch(err => console.log("❌ DB Error:", err));
 
-// ================= EMAIL SETUP =================
+// ================= EMAIL SETUP (FIXED FOR RENDER) =================
 let otpStore = {}; 
+
+// 🔥 UPDATED TRANSPORTER (Best for Render/Cloud)
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    host: "smtp.gmail.com",
+    port: 587,              // ⚠️ 465 ki jagah 587 use karein (Render friendly)
+    secure: false,          // 587 ke liye ye false hota hai (ye insecure nahi hai, ye STARTTLS hai)
+    auth: { 
+        user: process.env.EMAIL_USER, 
+        pass: process.env.EMAIL_PASS // 16-Digit App Password
+    },
+    tls: {
+        rejectUnauthorized: false // ⚠️ Render par SSL error rokne ke liye
+    }
+});
+
+// Server Start hone par Email Connection Check karein
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Email Service Error:", error);
+    } else {
+        console.log("✅ Email Service Ready (SMTP Connected)");
+    }
 });
 
 // Helper Function for Email
 const sendOTPEmail = async (email, otp) => {
     const mailOptions = {
-        from: `"Aura Security" <${process.env.EMAIL_USER}>`,
+        from: `"Aura App" <${process.env.EMAIL_USER}>`,
         to: email,
         subject: '🔐 Verify your Aura Account',
-        html: `<div style="padding:20px;"><h3>Your OTP is: <b>${otp}</b></h3></div>`
+        html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                <h2 style="color: #6d28d9;">Aura Verification</h2>
+                <p>Your OTP for account verification is:</p>
+                <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
+                <p>This code expires in 5 minutes.</p>
+            </div>
+        `
     };
     return transporter.sendMail(mailOptions);
 };
 
-// ================= ROUTES IMPORT =================
-const userRoutes = require('./routes/userRoutes');
-const chatRoutes = require("./routes/chatRoutes");
-const messageRoutes = require("./routes/messageRoutes");
+// ================= ROUTES =================
 
-// Use Routes
-app.use('/api/users', userRoutes);
-app.use("/api/chat", chatRoutes);
-app.use("/api/messages", messageRoutes);
+// 1. Send OTP Route
+app.post('/send-otp', async (req, res) => {
+    const { email } = req.body;
+    console.log(`📩 Processing OTP for: ${email}`);
 
+    try {
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ message: "User exists. Please Login." });
+        }
 
-// ================= AUTH ROUTES (Direct in Server) =================
-// Note: Behtar hoga inhe userController mein shift karein, par yahan bhi chalega
+        const otp = crypto.randomInt(100000, 999999).toString();
+        
+        // Store OTP
+        otpStore[email] = otp;
+        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
+
+        // Send Email
+        await sendOTPEmail(email, otp);
+        
+        console.log(`✅ OTP Sent to ${email}`);
+        res.status(200).json({ message: "OTP sent successfully" });
+
+    } catch (error) {
+        console.error("❌ Email Failed:", error); 
+        res.status(500).json({ 
+            message: "Failed to send email. Check backend logs.", 
+            error: error.message 
+        });
+    }
+});
+
+// 2. Verify Signup Route
+app.post('/verify-signup', async (req, res) => {
+    try {
+        const { username, name, email, password, age, phone, otp } = req.body;
+        
+        // Debug Log
+        // console.log(`Verifying: ${email} | Input: ${otp} | Stored: ${otpStore[email]}`);
+
+        if (!otpStore[email] || otpStore[email] !== otp) {
+            return res.status(400).json({ message: "Invalid or Expired OTP" });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
+        
+        delete otpStore[email]; // Clear OTP
+
+        console.log("✅ User Created:", newUser.email);
+        res.status(201).json({ message: "User registered successfully", user: newUser });
+    } catch (error) { 
+        console.error("❌ Signup Error:", error);
+        res.status(500).json({ message: "Error creating user" }); 
+    }
+});
+
+// 3. Login Route
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -164,50 +197,10 @@ app.post('/login', async (req, res) => {
     } catch (error) { res.status(500).json({ message: "Server Error" }); }
 });
 
-app.post('/send-otp', async (req, res) => {
-    const { email } = req.body;
-    try {
-        const existingUser = await User.findOne({ email });
-        if (existingUser) return res.status(400).json({ message: "User exists. Please Login." });
-
-        const otp = crypto.randomInt(100000, 999999).toString();
-        otpStore[email] = otp;
-        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
-
-        await sendOTPEmail(email, otp);
-        res.status(200).json({ message: "OTP sent successfully" });
-    } catch (error) { res.status(500).json({ message: "Failed to send email" }); }
-});
-
-app.post('/verify-signup', async (req, res) => {
-    try {
-        const { username, name, email, password, age, phone, otp } = req.body;
-        if (!otpStore[email] || otpStore[email] !== otp) return res.status(400).json({ message: "Invalid OTP" });
-
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
-        delete otpStore[email];
-
-        res.status(201).json({ message: "User registered", user: newUser });
-    } catch (error) { res.status(500).json({ message: "Error creating user" }); }
-});
-
-// FCM Token
-app.put("/api/users/fcm-token", async (req, res) => {
-    try {
-        const { fcmToken } = req.body;
-        if (!fcmToken) return res.status(400).json({ message: "Required fcmToken" });
-        
-        const authHeader = req.headers.authorization;
-        if (!authHeader) return res.status(401).json({ message: "Unauthorized" });
-        
-        const token = authHeader.split(" ")[1];
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || "secret");
-        
-        await User.findByIdAndUpdate(decoded.id, { fcmToken: fcmToken });
-        res.status(200).send("Token updated");
-    } catch (error) { res.status(500).send(error.message); }
-});
+// Use Imported Routes
+app.use('/api/users', userRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/messages", messageRoutes);
 
 // ================= CLOUDINARY SETUP =================
 cloudinary.config({
@@ -229,7 +222,19 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// ================= 🔥 SOCKET LOGIC (Fixed for Real-Time) =================
+// ================= 🔥 SOCKET LOGIC =================
+const io = new Server(server, {
+  pingTimeout: 60000,
+  cors: { 
+    // Yahan bhi production URL allow karein
+    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+});
+
+app.set('io', io); 
+
 let userSocketMap = {}; 
 let liveSessions = {};  
 let disconnectTimers = {};
@@ -237,28 +242,23 @@ let disconnectTimers = {};
 io.on("connection", (socket) => {
   console.log("🔌 Socket Connected:", socket.id);
 
-  // 1. User Setup
   const userId = socket.handshake.query.userId;
   if (userId && userId !== "undefined") {
       userSocketMap[userId] = socket.id;
       socket.join(userId); 
       io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
       socket.emit("update-live-sessions", Object.values(liveSessions));
-      console.log(`👤 User Map Updated: ${userId}`);
   }
 
-  // 2. Chat Room Join (The most important part for messaging)
   socket.on("join_channel", (room) => {
       if(!room) return;
       socket.join(room);
-      console.log(`✅ User ${socket.id} JOINED Room: ${room}`); 
   });
 
-  // 3. Typing Indicators
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
-  // 4. Call Logic
+  // Call Logic
   socket.on("callUser", (data) => {
       const socketId = userSocketMap[data.userToCall];
       if(socketId) io.to(socketId).emit("callUser", { signal: data.signalData, from: data.from, name: data.name });
@@ -268,7 +268,7 @@ io.on("connection", (socket) => {
       if(socketId) io.to(socketId).emit("callAccepted", data.signal);
   });
 
-  // 5. Live Stream Logic
+  // Live Stream Logic
   socket.on("start-live", (data) => {
     const { roomId, title, user } = data;
     if (disconnectTimers[roomId]) {
@@ -298,12 +298,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC Signaling for Live
+  // WebRTC Signaling
   socket.on("live-offer", ({ offer, viewerId }) => io.to(viewerId).emit("live-offer", { offer, hostId: socket.id }));
   socket.on("live-answer", ({ answer, hostId }) => io.to(hostId).emit("live-answer", { answer, viewerId: socket.id }));
   socket.on("live-ice-candidate", ({ candidate, targetId }) => io.to(targetId).emit("live-ice-candidate", { candidate, senderId: socket.id }));
 
-  // 6. Disconnect
   socket.on("disconnect", () => {
     console.log("❌ Socket Disconnected:", socket.id);
     if (userId) {
@@ -311,7 +310,6 @@ io.on("connection", (socket) => {
         io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
     }
     
-    // Live Stream Cleanup
     const roomId = Object.keys(liveSessions).find(id => liveSessions[id].hostId === socket.id);
     if (roomId) {
        disconnectTimers[roomId] = setTimeout(() => {
@@ -329,5 +327,3 @@ io.on("connection", (socket) => {
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
-
-module.exports = { app, io, server };
