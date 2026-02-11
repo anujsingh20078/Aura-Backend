@@ -76,16 +76,26 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
 let otpStore = {}; 
 
 // 🔥 UPDATED TRANSPORTER (PORT 465 - SSL MODE)
+// 🔥 UPDATED TRANSPORTER (Connection Timeout Fix)
 const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,              // ⚠️ Changed to 465 (Fixes Timeout)
-    secure: true,           // ⚠️ Must be true for 465
+    service: 'gmail',  // ⚠️ 'service' use karne se Nodemailer automatically best port dhund leta hai
+    host: 'smtp.googlemail.com', // ⚠️ 'gmail.com' ki jagah 'googlemail.com' use karein (Ye network blocks bypass karta hai)
+    port: 465, // Ya 587, service mode ise override kar lega agar zaroorat padi
+    secure: true,
     auth: { 
         user: process.env.EMAIL_USER, 
         pass: process.env.EMAIL_PASS 
     }
 });
 
+// Verification Log
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Email Service Error:", error);
+    } else {
+        console.log("✅ Email Service Ready (SMTP Connected)");
+    }
+});
 // Server Start hone par Email Connection Check karein
 transporter.verify((error, success) => {
     if (error) {
