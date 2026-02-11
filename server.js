@@ -2,19 +2,19 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const nodemailer = require('nodemailer'); 
-const bcrypt = require('bcryptjs'); 
+const { Resend } = require('resend'); // 🔥 Nodemailer hata kar Resend lagaya
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const admin = require("firebase-admin");
-const { Server } = require("socket.io"); 
+const { Server } = require("socket.io");
 const http = require("http");
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
-const crypto = require("crypto"); 
+const crypto = require("crypto");
 
 // Models & Routes
-const User = require("./models/User"); 
+const User = require("./models/User");
 const chatRoutes = require("./routes/chatRoutes");
 const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require('./routes/userRoutes');
@@ -24,10 +24,18 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 const server = http.createServer(app);
 
+// ================= RESEND SETUP (Better than SMTP) =================
+// Agar API Key nahi mili toh crash na kare, bas warning de
+const resend = process.env.RESEND_API_KEY 
+    ? new Resend(process.env.RESEND_API_KEY) 
+    : null;
+
+if (!resend) console.log("⚠️ WARNING: RESEND_API_KEY is missing in .env");
+
 // ================= MIDDLEWARES =================
 app.use(express.json());
 app.use(cors({
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"], 
+    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -40,7 +48,7 @@ try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
         privateKey = serviceAccount.private_key
-            ? serviceAccount.private_key.replace(/\\n/g, '\n') 
+            ? serviceAccount.private_key.replace(/\\n/g, '\n')
             : undefined;
     } else {
         try {
@@ -56,7 +64,7 @@ try {
             credential: admin.credential.cert({
                 projectId: serviceAccount.project_id,
                 clientEmail: serviceAccount.client_email,
-                privateKey: privateKey 
+                privateKey: privateKey
             })
         });
         console.log("🔥 Firebase Admin Initialized Successfully");
@@ -72,48 +80,36 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
   .then(() => console.log("✅ MongoDB Connected"))
   .catch(err => console.log("❌ DB Error:", err));
 
-// ================= EMAIL SETUP (BREVO SMTP - NO TIMEOUT) =================
-let otpStore = {}; 
+// ================= EMAIL HELPER (RESEND API) =================
+let otpStore = {};
 
-// 🔥 Brevo SMTP Configuration
-// 🔥 UPDATED TRANSPORTER (IPv6 Disable Fix)
-const transporter = nodemailer.createTransport({
-    service: 'gmail', 
-    host: 'smtp.googlemail.com',
-    port: 465,
-    secure: true,
-    auth: { 
-        user: process.env.EMAIL_USER, 
-        pass: process.env.EMAIL_PASS 
-    },
-    family: 4 // ⚠️ YE HAI MAGIC LINE (Sirf IPv4 use karega)
-});
-
-// Verification Log
-transporter.verify((error, success) => {
-    if (error) {
-        console.log("❌ Email Service Error:", error);
-    } else {
-        console.log("✅ Email Service Ready (SMTP Connected via IPv4)");
-    }
-});
-
-// Helper Function for Email
 const sendOTPEmail = async (email, otp) => {
-    const mailOptions = {
-        from: `"Aura App" <${process.env.EMAIL_USER}>`, // Sender email wahi hona chahiye jo Brevo mein hai
-        to: email, // Ab ye kisi bhi email par jayega
-        subject: '🔐 Verify your Aura Account',
-        html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-                <h2 style="color: #6d28d9;">Aura Verification</h2>
-                <p>Your OTP for account verification is:</p>
-                <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
-                <p>This code expires in 5 minutes.</p>
-            </div>
-        `
-    };
-    return transporter.sendMail(mailOptions);
+    if (!resend) throw new Error("Resend API Key missing");
+
+    // Note: Free Resend account se sirf apne registered email par bhej sakte hain
+    // jab tak aap Domain verify nahi karte.
+    // Testing ke liye 'onboarding@resend.dev' use karein.
+    
+    try {
+        const data = await resend.emails.send({
+            from: 'onboarding@resend.dev', // Ye default testing email hai, isse change mat karna abhi
+            to: email, 
+            subject: '🔐 Verify your Aura Account',
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #6d28d9;">Aura Verification</h2>
+                    <p>Your OTP for account verification is:</p>
+                    <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
+                    <p>This code expires in 5 minutes.</p>
+                </div>
+            `
+        });
+        console.log("✅ Email Sent via Resend ID:", data.id);
+        return data;
+    } catch (error) {
+        console.error("❌ Resend API Error:", error);
+        throw error;
+    }
 };
 
 // ================= ROUTES =================
@@ -131,18 +127,16 @@ app.post('/send-otp', async (req, res) => {
 
         const otp = crypto.randomInt(100000, 999999).toString();
         
-        // Store OTP
         otpStore[email] = otp;
         setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
 
-        // Send Email
         await sendOTPEmail(email, otp);
         
         console.log(`✅ OTP Sent to ${email}`);
         res.status(200).json({ message: "OTP sent successfully" });
 
     } catch (error) {
-        console.error("❌ Email Failed:", error); 
+        console.error("❌ Email Failed:", error);
         res.status(500).json({ 
             message: "Failed to send email. Check backend logs.", 
             error: error.message 
@@ -162,7 +156,7 @@ app.post('/verify-signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
         
-        delete otpStore[email]; // Clear OTP
+        delete otpStore[email]; 
 
         console.log("✅ User Created:", newUser.email);
         res.status(201).json({ message: "User registered successfully", user: newUser });
@@ -252,7 +246,6 @@ io.on("connection", (socket) => {
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
-  // Call Logic
   socket.on("callUser", (data) => {
       const socketId = userSocketMap[data.userToCall];
       if(socketId) io.to(socketId).emit("callUser", { signal: data.signalData, from: data.from, name: data.name });
@@ -262,7 +255,6 @@ io.on("connection", (socket) => {
       if(socketId) io.to(socketId).emit("callAccepted", data.signal);
   });
 
-  // Live Stream Logic
   socket.on("start-live", (data) => {
     const { roomId, title, user } = data;
     if (disconnectTimers[roomId]) {
@@ -292,7 +284,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC Signaling
   socket.on("live-offer", ({ offer, viewerId }) => io.to(viewerId).emit("live-offer", { offer, hostId: socket.id }));
   socket.on("live-answer", ({ answer, hostId }) => io.to(hostId).emit("live-answer", { answer, viewerId: socket.id }));
   socket.on("live-ice-candidate", ({ candidate, targetId }) => io.to(targetId).emit("live-ice-candidate", { candidate, senderId: socket.id }));
