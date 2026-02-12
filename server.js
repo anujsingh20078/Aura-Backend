@@ -96,19 +96,24 @@ mongoose.connect(mongoURI)
 let otpStore = {}; 
 
 // 🔥 Brevo SMTP Configuration with TLS Fix
+// ================= EMAIL SETUP (BREVO SMTP - RAILWAY FIX) =================
 const transporter = nodemailer.createTransport({
-    host: "smtp-relay.brevo.com", 
-    port: 587,                    
-    secure: false,                
-    auth: { 
-        user: process.env.EMAIL_USER, // Brevo Login Email
-        pass: process.env.EMAIL_PASS  // Brevo SMTP Master Key (Not login password)
+    host: "smtp-relay.brevo.com",
+    port: 2525, // ⚠️ 587 ki jagah 2525 use karein (Ye blocked nahi hota)
+    secure: false, 
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
     },
     tls: {
-        rejectUnauthorized: false, // ⚠️ Railway Fix: Helps with cloud SSL issues
+        rejectUnauthorized: false, // Self-signed certificate fix
         ciphers: "SSLv3"
     },
-    logger: true, // Logs detailed info for debugging
+    // Timeout settings add karein taaki connection hang na ho
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
+    logger: true,
     debug: true
 });
 
