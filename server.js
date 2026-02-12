@@ -20,56 +20,91 @@ const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require('./routes/userRoutes');
 
 const PORT = process.env.PORT || 5000;
+
 const app = express();
 const server = http.createServer(app);
 
-// ================= 1. MIDDLEWARES (CORS Fix) =================
+// ================= MIDDLEWARES =================
 app.use(express.json());
-
-// Railway aur Vercel/Localhost sabke liye Flexible CORS
 app.use(cors({
-    origin: true, // Auto-allow requesting origin (Frontend)
+    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"], 
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// ================= 2. DB CONNECTION (Stability Fix) =================
-mongoose.connect(process.env.MONGO_URI, {
-    serverSelectionTimeoutMS: 5000, // 5s se zyada wait na kare
-})
-  .then(() => console.log("✅ MongoDB Connected Successfully"))
-  .catch(err => console.log("❌ DB Connection Error:", err.message));
+// ================= FIREBASE SETUP =================
+try {
+    let serviceAccount;
+    let privateKey;
 
-// ================= 3. EMAIL SETUP (Gmail SMTP + IPv4 Fix) =================
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        privateKey = serviceAccount.private_key
+            ? serviceAccount.private_key.replace(/\\n/g, '\n') 
+            : undefined;
+    } else {
+        try {
+            serviceAccount = require("./firebase-service-key.json");
+            privateKey = serviceAccount.private_key;
+        } catch (e) {
+            console.log("⚠️ No local firebase file found, relying on Env Vars.");
+        }
+    }
+
+    if (serviceAccount && privateKey) {
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId: serviceAccount.project_id,
+                clientEmail: serviceAccount.client_email,
+                privateKey: privateKey 
+            })
+        });
+        console.log("🔥 Firebase Admin Initialized Successfully");
+    } else {
+        console.log("⚠️ Firebase Warning: Notifications won't work.");
+    }
+} catch (error) {
+    console.log("⚠️ Firebase Config Error: " + error.message);
+}
+
+// ================= DB CONNECTION =================
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.log("❌ DB Error:", err));
+
+// ================= EMAIL SETUP (BREVO SMTP - NO TIMEOUT) =================
 let otpStore = {}; 
 
+// 🔥 Brevo SMTP Configuration
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    host: 'smtp.googlemail.com',
-    port: 465,
-    secure: true,
+    host: "smtp-relay.brevo.com", // Brevo ka server
+    port: 587,                    // Standard Port
+    secure: false,                // False for 587
     auth: { 
-        user: process.env.EMAIL_USER, 
-        pass: process.env.EMAIL_PASS 
-    },
-    family: 4 // 🔥 VVIP: Ye Railway par connection timeout rokta hai
-});
-
-// Verification Log
-transporter.verify((error, success) => {
-    if (error) {
-        console.log("❌ Email Service Error:", error.message);
-    } else {
-        console.log("✅ Gmail SMTP Ready (IPv4 Mode)");
+        user: process.env.EMAIL_USER, // Brevo Login Email
+        pass: process.env.EMAIL_PASS  // Brevo SMTP Key (Not account password)
     }
 });
 
-// Helper Function: Send OTP
+// Verify Connection
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Brevo Connection Error:", error);
+    } else {
+        console.log("✅ Brevo Email Service Ready");
+    }
+});
+  
+
+console.log("---------------------------------------");
+console.log("📧 Email User:", process.env.EMAIL_USER);
+console.log("🔑 Email Pass Length:", process.env.EMAIL_PASS ? process.env.EMAIL_PASS.length : "MISSING");
+console.log("---------------------------------------");
+// Helper Function for Email
 const sendOTPEmail = async (email, otp) => {
     const mailOptions = {
-        from: `"Aura App" <${process.env.EMAIL_USER}>`,
-        to: email,
+        from: `"Aura App" <${process.env.EMAIL_USER}>`, // Sender email wahi hona chahiye jo Brevo mein hai
+        to: email, // Ab ye kisi bhi email par jayega
         subject: '🔐 Verify your Aura Account',
         html: `
             <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
@@ -83,42 +118,41 @@ const sendOTPEmail = async (email, otp) => {
     return transporter.sendMail(mailOptions);
 };
 
-// ================= 4. AUTH ROUTES =================
+// ================= ROUTES =================
 
-// Send OTP Route
+// 1. Send OTP Route
 app.post('/send-otp', async (req, res) => {
     const { email } = req.body;
-    console.log(`📩 OTP Request for: ${email}`);
+    console.log(`📩 Processing OTP for: ${email}`);
 
     try {
-        if (mongoose.connection.readyState !== 1) {
-            return res.status(500).json({ message: "Database not connected yet" });
-        }
-
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ message: "User exists. Please Login." });
         }
 
         const otp = crypto.randomInt(100000, 999999).toString();
+        
+        // Store OTP
         otpStore[email] = otp;
         setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
 
+        // Send Email
         await sendOTPEmail(email, otp);
         
         console.log(`✅ OTP Sent to ${email}`);
         res.status(200).json({ message: "OTP sent successfully" });
 
     } catch (error) {
-        console.error("🔥 Email Error:", error.message);
+        console.error("❌ Email Failed:", error); 
         res.status(500).json({ 
-            message: "Failed to send OTP", 
+            message: "Failed to send email. Check backend logs.", 
             error: error.message 
         });
     }
 });
 
-// Verify Signup Route
+// 2. Verify Signup Route
 app.post('/verify-signup', async (req, res) => {
     try {
         const { username, name, email, password, age, phone, otp } = req.body;
@@ -130,7 +164,8 @@ app.post('/verify-signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
         
-        delete otpStore[email];
+        delete otpStore[email]; // Clear OTP
+
         console.log("✅ User Created:", newUser.email);
         res.status(201).json({ message: "User registered successfully", user: newUser });
     } catch (error) { 
@@ -139,7 +174,7 @@ app.post('/verify-signup', async (req, res) => {
     }
 });
 
-// Login Route
+// 3. Login Route
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -159,12 +194,12 @@ app.post('/login', async (req, res) => {
     } catch (error) { res.status(500).json({ message: "Server Error" }); }
 });
 
-// Mount Other Routes
+// Use Imported Routes
 app.use('/api/users', userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);
 
-// ================= 5. CLOUDINARY & FIREBASE =================
+// ================= CLOUDINARY SETUP =================
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -178,58 +213,48 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     const result = await cloudinary.uploader.upload(req.file.path, { folder: "aura_chat", resource_type: "auto" });
     fs.unlinkSync(req.file.path);
     res.status(200).json({ url: result.secure_url });
-  } catch (error) { 
+  } catch (error) {
     if (req.file) fs.unlinkSync(req.file.path);
-    res.status(500).json({ message: "Upload failed" }); 
+    res.status(500).json({ message: "Upload failed" });
   }
 });
 
-// Firebase Init
-try {
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        admin.initializeApp({
-            credential: admin.credential.cert({
-                ...serviceAccount,
-                privateKey: serviceAccount.private_key.replace(/\\n/g, '\n')
-            })
-        });
-        console.log("🔥 Firebase Admin Initialized");
-    }
-} catch (e) { console.log("⚠️ Firebase Warning (Ignore if not using notifications):", e.message); }
-
-// ================= 6. SOCKET.IO LOGIC =================
+// ================= 🔥 SOCKET LOGIC =================
 const io = new Server(server, {
   pingTimeout: 60000,
   cors: { 
-    origin: true, 
-    credentials: true,
-    methods: ["GET", "POST"]
+    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
+    methods: ["GET", "POST"],
+    credentials: true
   },
 });
 
-app.set('io', io);
+app.set('io', io); 
+
 let userSocketMap = {}; 
 let liveSessions = {};  
 let disconnectTimers = {};
 
 io.on("connection", (socket) => {
   console.log("🔌 Socket Connected:", socket.id);
+
   const userId = socket.handshake.query.userId;
-  
   if (userId && userId !== "undefined") {
       userSocketMap[userId] = socket.id;
-      socket.join(userId);
-      io.emit("get-users", Object.keys(userSocketMap).map(id => ({ userId: id })));
+      socket.join(userId); 
+      io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
       socket.emit("update-live-sessions", Object.values(liveSessions));
   }
 
-  // --- Chat Events ---
-  socket.on("join_channel", (room) => { if(room) socket.join(room); });
+  socket.on("join_channel", (room) => {
+      if(!room) return;
+      socket.join(room);
+  });
+
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
-  // --- Call Events ---
+  // Call Logic
   socket.on("callUser", (data) => {
       const socketId = userSocketMap[data.userToCall];
       if(socketId) io.to(socketId).emit("callUser", { signal: data.signalData, from: data.from, name: data.name });
@@ -239,7 +264,7 @@ io.on("connection", (socket) => {
       if(socketId) io.to(socketId).emit("callAccepted", data.signal);
   });
 
-  // --- Live Stream Events ---
+  // Live Stream Logic
   socket.on("start-live", (data) => {
     const { roomId, title, user } = data;
     if (disconnectTimers[roomId]) {
@@ -269,20 +294,18 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC ICE & Offers
+  // WebRTC Signaling
   socket.on("live-offer", ({ offer, viewerId }) => io.to(viewerId).emit("live-offer", { offer, hostId: socket.id }));
   socket.on("live-answer", ({ answer, hostId }) => io.to(hostId).emit("live-answer", { answer, viewerId: socket.id }));
   socket.on("live-ice-candidate", ({ candidate, targetId }) => io.to(targetId).emit("live-ice-candidate", { candidate, senderId: socket.id }));
 
-  // Disconnect Handler
   socket.on("disconnect", () => {
-    console.log("❌ Disconnected:", socket.id);
+    console.log("❌ Socket Disconnected:", socket.id);
     if (userId) {
         delete userSocketMap[userId];
-        io.emit("get-users", Object.keys(userSocketMap).map(id => ({ userId: id })));
+        io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
     }
     
-    // Live Stream Cleanup Timer
     const roomId = Object.keys(liveSessions).find(id => liveSessions[id].hostId === socket.id);
     if (roomId) {
        disconnectTimers[roomId] = setTimeout(() => {
@@ -296,7 +319,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ================= 7. START SERVER =================
+// ================= SERVER START =================
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
