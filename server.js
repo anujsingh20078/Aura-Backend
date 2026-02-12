@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const { Resend } = require('resend'); // 🔥 Nodemailer hata kar Resend lagaya
+const nodemailer = require('nodemailer'); // ✅ SMTP ke liye
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const admin = require("firebase-admin");
@@ -20,115 +20,86 @@ const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require('./routes/userRoutes');
 
 const PORT = process.env.PORT || 5000;
-
 const app = express();
 const server = http.createServer(app);
 
-// ================= RESEND SETUP (Better than SMTP) =================
-// Agar API Key nahi mili toh crash na kare, bas warning de
-const resend = process.env.RESEND_API_KEY 
-    ? new Resend(process.env.RESEND_API_KEY) 
-    : null;
-
-if (!resend) console.log("⚠️ WARNING: RESEND_API_KEY is missing in .env");
-
-// ================= MIDDLEWARES =================
+// ================= 1. MIDDLEWARES (CORS & JSON) =================
 app.use(express.json());
 app.use(cors({
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
+    origin: true, // ✅ Railway/Render par best setting (Auto-allow frontend)
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 }));
 
-// ================= FIREBASE SETUP =================
-try {
-    let serviceAccount;
-    let privateKey;
+// ================= 2. DB CONNECTION (Stability Fix) =================
+mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 5000, // 5 second se zyada wait na kare
+})
+.then(() => console.log("✅ MongoDB Connected Successfully"))
+.catch(err => console.log("❌ DB Connection Error:", err.message));
 
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        privateKey = serviceAccount.private_key
-            ? serviceAccount.private_key.replace(/\\n/g, '\n')
-            : undefined;
-    } else {
-        try {
-            serviceAccount = require("./firebase-service-key.json");
-            privateKey = serviceAccount.private_key;
-        } catch (e) {
-            console.log("⚠️ No local firebase file found, relying on Env Vars.");
-        }
-    }
-
-    if (serviceAccount && privateKey) {
-        admin.initializeApp({
-            credential: admin.credential.cert({
-                projectId: serviceAccount.project_id,
-                clientEmail: serviceAccount.client_email,
-                privateKey: privateKey
-            })
-        });
-        console.log("🔥 Firebase Admin Initialized Successfully");
-    } else {
-        console.log("⚠️ Firebase Warning: Notifications won't work.");
-    }
-} catch (error) {
-    console.log("⚠️ Firebase Config Error: " + error.message);
-}
-
-// ================= DB CONNECTION =================
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch(err => console.log("❌ DB Error:", err));
-
-// ================= EMAIL HELPER (RESEND API) =================
+// ================= 3. GMAIL SMTP SETUP (The Magic Fix) =================
 let otpStore = {};
 
-const sendOTPEmail = async (email, otp) => {
-    if (!resend) throw new Error("Resend API Key missing");
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    host: 'smtp.googlemail.com', // Stable Google Host
+    port: 465,
+    secure: true,
+    auth: {
+        user: process.env.EMAIL_USER, // .env se email
+        pass: process.env.EMAIL_PASS  // .env se 16-digit App Password
+    },
+    family: 4 // 🔥 VVIP: Ye IPv4 force karta hai taaki Railway/Render block na ho
+});
 
-    // Note: Free Resend account se sirf apne registered email par bhej sakte hain
-    // jab tak aap Domain verify nahi karte.
-    // Testing ke liye 'onboarding@resend.dev' use karein.
-    
-    try {
-        const data = await resend.emails.send({
-            from: 'onboarding@resend.dev', // Ye default testing email hai, isse change mat karna abhi
-            to: email, 
-            subject: '🔐 Verify your Aura Account',
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-                    <h2 style="color: #6d28d9;">Aura Verification</h2>
-                    <p>Your OTP for account verification is:</p>
-                    <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
-                    <p>This code expires in 5 minutes.</p>
-                </div>
-            `
-        });
-        console.log("✅ Email Sent via Resend ID:", data.id);
-        return data;
-    } catch (error) {
-        console.error("❌ Resend API Error:", error);
-        throw error;
+// Server start hote hi Email check karega
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Email Service Error:", error.message);
+    } else {
+        console.log("✅ Gmail SMTP Ready (IPv4 Mode)");
     }
+});
+
+// Helper Function: Email Bhejne ke liye
+const sendOTPEmail = async (email, otp) => {
+    const mailOptions = {
+        from: `"Aura App" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: '🔐 Verify your Aura Account',
+        html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                <h2 style="color: #6d28d9;">Aura Verification</h2>
+                <p>Your OTP code is:</p>
+                <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
+                <p>This code expires in 5 minutes.</p>
+            </div>
+        `
+    };
+    return transporter.sendMail(mailOptions);
 };
 
-// ================= ROUTES =================
+// ================= 4. AUTH ROUTES (OTP, Verify, Login) =================
 
-// 1. Send OTP Route
+// Route 1: Send OTP
 app.post('/send-otp', async (req, res) => {
     const { email } = req.body;
-    console.log(`📩 Processing OTP for: ${email}`);
+    console.log(`📩 OTP Request for: ${email}`);
 
     try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(500).json({ message: "Database not connected yet" });
+        }
+
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ message: "User exists. Please Login." });
         }
 
         const otp = crypto.randomInt(100000, 999999).toString();
-        
         otpStore[email] = otp;
-        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
+        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000); // 5 min expiry
 
         await sendOTPEmail(email, otp);
         
@@ -136,15 +107,15 @@ app.post('/send-otp', async (req, res) => {
         res.status(200).json({ message: "OTP sent successfully" });
 
     } catch (error) {
-        console.error("❌ Email Failed:", error);
+        console.error("🔥 Email Error:", error.message);
         res.status(500).json({ 
-            message: "Failed to send email. Check backend logs.", 
+            message: "Failed to send OTP", 
             error: error.message 
         });
     }
 });
 
-// 2. Verify Signup Route
+// Route 2: Verify OTP & Signup
 app.post('/verify-signup', async (req, res) => {
     try {
         const { username, name, email, password, age, phone, otp } = req.body;
@@ -156,8 +127,7 @@ app.post('/verify-signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
         
-        delete otpStore[email]; 
-
+        delete otpStore[email]; // Clear OTP after use
         console.log("✅ User Created:", newUser.email);
         res.status(201).json({ message: "User registered successfully", user: newUser });
     } catch (error) { 
@@ -166,7 +136,7 @@ app.post('/verify-signup', async (req, res) => {
     }
 });
 
-// 3. Login Route
+// Route 3: Login
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -186,12 +156,12 @@ app.post('/login', async (req, res) => {
     } catch (error) { res.status(500).json({ message: "Server Error" }); }
 });
 
-// Use Imported Routes
+// Use Other Routes
 app.use('/api/users', userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);
 
-// ================= CLOUDINARY SETUP =================
+// ================= 5. CLOUDINARY & FIREBASE =================
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -201,51 +171,56 @@ const upload = multer({ dest: "uploads/" });
 
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
     const result = await cloudinary.uploader.upload(req.file.path, { folder: "aura_chat", resource_type: "auto" });
     fs.unlinkSync(req.file.path);
     res.status(200).json({ url: result.secure_url });
-  } catch (error) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    res.status(500).json({ message: "Upload failed" });
+  } catch (error) { 
+    if(req.file) fs.unlinkSync(req.file.path);
+    res.status(500).json({ message: "Upload failed" }); 
   }
 });
 
-// ================= 🔥 SOCKET LOGIC =================
+// Firebase Init
+try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                ...serviceAccount,
+                privateKey: serviceAccount.private_key.replace(/\\n/g, '\n')
+            })
+        });
+        console.log("🔥 Firebase Admin Initialized");
+    }
+} catch (e) { console.log("⚠️ Firebase Warning:", e.message); }
+
+// ================= 6. SOCKET.IO LOGIC =================
 const io = new Server(server, {
   pingTimeout: 60000,
-  cors: { 
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
-    methods: ["GET", "POST"],
-    credentials: true
-  },
+  cors: { origin: true, credentials: true },
 });
 
-app.set('io', io); 
-
+app.set('io', io);
 let userSocketMap = {}; 
 let liveSessions = {};  
 let disconnectTimers = {};
 
 io.on("connection", (socket) => {
   console.log("🔌 Socket Connected:", socket.id);
-
   const userId = socket.handshake.query.userId;
+  
   if (userId && userId !== "undefined") {
       userSocketMap[userId] = socket.id;
-      socket.join(userId); 
+      socket.join(userId);
       io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
       socket.emit("update-live-sessions", Object.values(liveSessions));
   }
 
-  socket.on("join_channel", (room) => {
-      if(!room) return;
-      socket.join(room);
-  });
-
+  socket.on("join_channel", (room) => { if(room) socket.join(room); });
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
+  // Call Logic
   socket.on("callUser", (data) => {
       const socketId = userSocketMap[data.userToCall];
       if(socketId) io.to(socketId).emit("callUser", { signal: data.signalData, from: data.from, name: data.name });
@@ -255,6 +230,7 @@ io.on("connection", (socket) => {
       if(socketId) io.to(socketId).emit("callAccepted", data.signal);
   });
 
+  // Live Stream Logic
   socket.on("start-live", (data) => {
     const { roomId, title, user } = data;
     if (disconnectTimers[roomId]) {
@@ -284,17 +260,16 @@ io.on("connection", (socket) => {
     }
   });
 
+  // WebRTC Signaling
   socket.on("live-offer", ({ offer, viewerId }) => io.to(viewerId).emit("live-offer", { offer, hostId: socket.id }));
   socket.on("live-answer", ({ answer, hostId }) => io.to(hostId).emit("live-answer", { answer, viewerId: socket.id }));
   socket.on("live-ice-candidate", ({ candidate, targetId }) => io.to(targetId).emit("live-ice-candidate", { candidate, senderId: socket.id }));
 
   socket.on("disconnect", () => {
-    console.log("❌ Socket Disconnected:", socket.id);
     if (userId) {
         delete userSocketMap[userId];
         io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
     }
-    
     const roomId = Object.keys(liveSessions).find(id => liveSessions[id].hostId === socket.id);
     if (roomId) {
        disconnectTimers[roomId] = setTimeout(() => {
@@ -308,7 +283,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ================= SERVER START =================
+// ================= 7. START SERVER =================
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
