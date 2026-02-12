@@ -2,19 +2,19 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const nodemailer = require('nodemailer'); // ✅ SMTP ke liye
-const bcrypt = require('bcryptjs');
+const nodemailer = require('nodemailer'); 
+const bcrypt = require('bcryptjs'); 
 const jwt = require('jsonwebtoken');
 const admin = require("firebase-admin");
-const { Server } = require("socket.io");
+const { Server } = require("socket.io"); 
 const http = require("http");
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
-const crypto = require("crypto");
+const crypto = require("crypto"); 
 
 // Models & Routes
-const User = require("./models/User");
+const User = require("./models/User"); 
 const chatRoutes = require("./routes/chatRoutes");
 const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require('./routes/userRoutes');
@@ -23,37 +23,40 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 const server = http.createServer(app);
 
-// ================= 1. MIDDLEWARES (CORS & JSON) =================
+// ================= 1. MIDDLEWARES (CORS Fix) =================
 app.use(express.json());
+
+// Railway aur Vercel/Localhost sabke liye Flexible CORS
 app.use(cors({
-    origin: true, // ✅ Railway/Render par best setting (Auto-allow frontend)
+    origin: true, // Auto-allow requesting origin (Frontend)
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // ================= 2. DB CONNECTION (Stability Fix) =================
 mongoose.connect(process.env.MONGO_URI, {
-    serverSelectionTimeoutMS: 5000, // 5 second se zyada wait na kare
+    serverSelectionTimeoutMS: 5000, // 5s se zyada wait na kare
 })
-.then(() => console.log("✅ MongoDB Connected Successfully"))
-.catch(err => console.log("❌ DB Connection Error:", err.message));
+  .then(() => console.log("✅ MongoDB Connected Successfully"))
+  .catch(err => console.log("❌ DB Connection Error:", err.message));
 
-// ================= 3. GMAIL SMTP SETUP (The Magic Fix) =================
-let otpStore = {};
+// ================= 3. EMAIL SETUP (Gmail SMTP + IPv4 Fix) =================
+let otpStore = {}; 
 
 const transporter = nodemailer.createTransport({
     service: 'gmail',
-    host: 'smtp.googlemail.com', // Stable Google Host
+    host: 'smtp.googlemail.com',
     port: 465,
     secure: true,
-    auth: {
-        user: process.env.EMAIL_USER, // .env se email
-        pass: process.env.EMAIL_PASS  // .env se 16-digit App Password
+    auth: { 
+        user: process.env.EMAIL_USER, 
+        pass: process.env.EMAIL_PASS 
     },
-    family: 4 // 🔥 VVIP: Ye IPv4 force karta hai taaki Railway/Render block na ho
+    family: 4 // 🔥 VVIP: Ye Railway par connection timeout rokta hai
 });
 
-// Server start hote hi Email check karega
+// Verification Log
 transporter.verify((error, success) => {
     if (error) {
         console.log("❌ Email Service Error:", error.message);
@@ -62,7 +65,7 @@ transporter.verify((error, success) => {
     }
 });
 
-// Helper Function: Email Bhejne ke liye
+// Helper Function: Send OTP
 const sendOTPEmail = async (email, otp) => {
     const mailOptions = {
         from: `"Aura App" <${process.env.EMAIL_USER}>`,
@@ -71,7 +74,7 @@ const sendOTPEmail = async (email, otp) => {
         html: `
             <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
                 <h2 style="color: #6d28d9;">Aura Verification</h2>
-                <p>Your OTP code is:</p>
+                <p>Your OTP for account verification is:</p>
                 <h1 style="background: #f3f4f6; padding: 10px; display: inline-block; letter-spacing: 5px; color: #333;">${otp}</h1>
                 <p>This code expires in 5 minutes.</p>
             </div>
@@ -80,9 +83,9 @@ const sendOTPEmail = async (email, otp) => {
     return transporter.sendMail(mailOptions);
 };
 
-// ================= 4. AUTH ROUTES (OTP, Verify, Login) =================
+// ================= 4. AUTH ROUTES =================
 
-// Route 1: Send OTP
+// Send OTP Route
 app.post('/send-otp', async (req, res) => {
     const { email } = req.body;
     console.log(`📩 OTP Request for: ${email}`);
@@ -99,7 +102,7 @@ app.post('/send-otp', async (req, res) => {
 
         const otp = crypto.randomInt(100000, 999999).toString();
         otpStore[email] = otp;
-        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000); // 5 min expiry
+        setTimeout(() => { delete otpStore[email] }, 5 * 60 * 1000);
 
         await sendOTPEmail(email, otp);
         
@@ -115,7 +118,7 @@ app.post('/send-otp', async (req, res) => {
     }
 });
 
-// Route 2: Verify OTP & Signup
+// Verify Signup Route
 app.post('/verify-signup', async (req, res) => {
     try {
         const { username, name, email, password, age, phone, otp } = req.body;
@@ -127,7 +130,7 @@ app.post('/verify-signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = await User.create({ username, name, email, password: hashedPassword, age, phone });
         
-        delete otpStore[email]; // Clear OTP after use
+        delete otpStore[email];
         console.log("✅ User Created:", newUser.email);
         res.status(201).json({ message: "User registered successfully", user: newUser });
     } catch (error) { 
@@ -136,7 +139,7 @@ app.post('/verify-signup', async (req, res) => {
     }
 });
 
-// Route 3: Login
+// Login Route
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -156,7 +159,7 @@ app.post('/login', async (req, res) => {
     } catch (error) { res.status(500).json({ message: "Server Error" }); }
 });
 
-// Use Other Routes
+// Mount Other Routes
 app.use('/api/users', userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);
@@ -171,11 +174,12 @@ const upload = multer({ dest: "uploads/" });
 
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   try {
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
     const result = await cloudinary.uploader.upload(req.file.path, { folder: "aura_chat", resource_type: "auto" });
     fs.unlinkSync(req.file.path);
     res.status(200).json({ url: result.secure_url });
   } catch (error) { 
-    if(req.file) fs.unlinkSync(req.file.path);
+    if (req.file) fs.unlinkSync(req.file.path);
     res.status(500).json({ message: "Upload failed" }); 
   }
 });
@@ -192,12 +196,16 @@ try {
         });
         console.log("🔥 Firebase Admin Initialized");
     }
-} catch (e) { console.log("⚠️ Firebase Warning:", e.message); }
+} catch (e) { console.log("⚠️ Firebase Warning (Ignore if not using notifications):", e.message); }
 
 // ================= 6. SOCKET.IO LOGIC =================
 const io = new Server(server, {
   pingTimeout: 60000,
-  cors: { origin: true, credentials: true },
+  cors: { 
+    origin: true, 
+    credentials: true,
+    methods: ["GET", "POST"]
+  },
 });
 
 app.set('io', io);
@@ -212,15 +220,16 @@ io.on("connection", (socket) => {
   if (userId && userId !== "undefined") {
       userSocketMap[userId] = socket.id;
       socket.join(userId);
-      io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
+      io.emit("get-users", Object.keys(userSocketMap).map(id => ({ userId: id })));
       socket.emit("update-live-sessions", Object.values(liveSessions));
   }
 
+  // --- Chat Events ---
   socket.on("join_channel", (room) => { if(room) socket.join(room); });
   socket.on("typing", (room) => socket.in(room).emit("typing"));
   socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
 
-  // Call Logic
+  // --- Call Events ---
   socket.on("callUser", (data) => {
       const socketId = userSocketMap[data.userToCall];
       if(socketId) io.to(socketId).emit("callUser", { signal: data.signalData, from: data.from, name: data.name });
@@ -230,7 +239,7 @@ io.on("connection", (socket) => {
       if(socketId) io.to(socketId).emit("callAccepted", data.signal);
   });
 
-  // Live Stream Logic
+  // --- Live Stream Events ---
   socket.on("start-live", (data) => {
     const { roomId, title, user } = data;
     if (disconnectTimers[roomId]) {
@@ -260,16 +269,20 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC Signaling
+  // WebRTC ICE & Offers
   socket.on("live-offer", ({ offer, viewerId }) => io.to(viewerId).emit("live-offer", { offer, hostId: socket.id }));
   socket.on("live-answer", ({ answer, hostId }) => io.to(hostId).emit("live-answer", { answer, viewerId: socket.id }));
   socket.on("live-ice-candidate", ({ candidate, targetId }) => io.to(targetId).emit("live-ice-candidate", { candidate, senderId: socket.id }));
 
+  // Disconnect Handler
   socket.on("disconnect", () => {
+    console.log("❌ Disconnected:", socket.id);
     if (userId) {
         delete userSocketMap[userId];
-        io.emit("get-users", Object.keys(userSocketMap).map((id) => ({ userId: id })));
+        io.emit("get-users", Object.keys(userSocketMap).map(id => ({ userId: id })));
     }
+    
+    // Live Stream Cleanup Timer
     const roomId = Object.keys(liveSessions).find(id => liveSessions[id].hostId === socket.id);
     if (roomId) {
        disconnectTimers[roomId] = setTimeout(() => {
