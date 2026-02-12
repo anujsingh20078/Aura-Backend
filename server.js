@@ -26,11 +26,26 @@ const server = http.createServer(app);
 
 // ================= MIDDLEWARES =================
 app.use(express.json());
+
+// Update this list with your actual frontend URLs
+const allowedOrigins = [
+  "http://localhost:8080", 
+  "http://localhost:5173", 
+  "http://localhost:3000", 
+  "https://your-frontend-url.vercel.app" // Apka production frontend URL yahan zarur dalein
+];
+
 app.use(cors({
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"], 
+    origin: allowedOrigins, 
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// ✅ HEALTH CHECK ROUTE (Railway Fix)
+// Ye route check karega ki server zinda hai ya nahi
+app.get('/', (req, res) => {
+    res.status(200).send("<h1>✅ Aura Chat Server is Running & Healthy!</h1>");
+});
 
 // ================= FIREBASE SETUP =================
 try {
@@ -61,29 +76,40 @@ try {
         });
         console.log("🔥 Firebase Admin Initialized Successfully");
     } else {
-        console.log("⚠️ Firebase Warning: Notifications won't work.");
+        console.log("⚠️ Firebase Warning: Notifications won't work (Check Env Vars).");
     }
 } catch (error) {
     console.log("⚠️ Firebase Config Error: " + error.message);
 }
 
 // ================= DB CONNECTION =================
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat')
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch(err => console.log("❌ DB Error:", err));
+const mongoURI = process.env.MONGO_URI || 'mongodb://localhost:27017/Aura-chat';
 
-// ================= EMAIL SETUP (BREVO SMTP - NO TIMEOUT) =================
+mongoose.connect(mongoURI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => {
+      console.log("❌ DB Error:", err);
+      // Agar DB connect na ho to process exit mat karna, taaki logs dikh sakein
+  });
+
+// ================= EMAIL SETUP (BREVO SMTP - UPDATED) =================
 let otpStore = {}; 
 
-// 🔥 Brevo SMTP Configuration
+// 🔥 Brevo SMTP Configuration with TLS Fix
 const transporter = nodemailer.createTransport({
-    host: "smtp-relay.brevo.com", // Brevo ka server
-    port: 587,                    // Standard Port
-    secure: false,                // False for 587
+    host: "smtp-relay.brevo.com", 
+    port: 587,                    
+    secure: false,                
     auth: { 
         user: process.env.EMAIL_USER, // Brevo Login Email
-        pass: process.env.EMAIL_PASS  // Brevo SMTP Key (Not account password)
-    }
+        pass: process.env.EMAIL_PASS  // Brevo SMTP Master Key (Not login password)
+    },
+    tls: {
+        rejectUnauthorized: false, // ⚠️ Railway Fix: Helps with cloud SSL issues
+        ciphers: "SSLv3"
+    },
+    logger: true, // Logs detailed info for debugging
+    debug: true
 });
 
 // Verify Connection
@@ -95,16 +121,11 @@ transporter.verify((error, success) => {
     }
 });
   
-
-console.log("---------------------------------------");
-console.log("📧 Email User:", process.env.EMAIL_USER);
-console.log("🔑 Email Pass Length:", process.env.EMAIL_PASS ? process.env.EMAIL_PASS.length : "MISSING");
-console.log("---------------------------------------");
 // Helper Function for Email
 const sendOTPEmail = async (email, otp) => {
     const mailOptions = {
-        from: `"Aura App" <${process.env.EMAIL_USER}>`, // Sender email wahi hona chahiye jo Brevo mein hai
-        to: email, // Ab ye kisi bhi email par jayega
+        from: `"Aura App" <${process.env.EMAIL_USER}>`, 
+        to: email, 
         subject: '🔐 Verify your Aura Account',
         html: `
             <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
@@ -223,7 +244,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 const io = new Server(server, {
   pingTimeout: 60000,
   cors: { 
-    origin: ["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "https://your-frontend-url.vercel.app"],
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true
   },
@@ -319,7 +340,9 @@ io.on("connection", (socket) => {
   });
 });
 
-// ================= SERVER START =================
-server.listen(PORT, () => {
+// ================= SERVER START (UPDATED) =================
+// ⚠️ Railway needs '0.0.0.0' to expose the port publicly
+server.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🌍 Open your Railway URL to check health!`);
 });
